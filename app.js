@@ -853,6 +853,7 @@
     connGen++;
     clearTimeout(reconnectTimer);
     clearInterval(tickTimer);
+    $('timer').textContent = ''; // a frozen time next to "대기" reads like a countdown
     const sock = ws;
     ws = null;
     if (sock) {
