@@ -4,6 +4,7 @@ Runs the real app against the real APIs: mic → worklet → Scribe Realtime →
 Midway it drops the socket to exercise reconnection.
 
     EL_KEY=... GM_KEY=... python tests/e2e.py tests/test.wav [seconds]
+    BASE_URL=https://jinukmoon.github.io/LiveCaption/ ...   # test the deployed site instead
 
 Screenshots and a JSON log go to tests/out/.
 """
@@ -35,7 +36,7 @@ def serve():
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    port = serve()
+    base = os.environ.get('BASE_URL') or f'http://127.0.0.1:{serve()}/'
     keys = urllib.parse.urlencode({k: v for k, v in (('el', os.environ.get('EL_KEY', '')),
                                                       ('gm', os.environ.get('GM_KEY', ''))) if v})
     log = {'console': [], 'sent_chunks': 0, 'server': [], 'samples': []}
@@ -66,7 +67,7 @@ def main():
             ws.on('framereceived', received)
         page.on('websocket', on_ws)
 
-        page.goto(f'http://127.0.0.1:{port}/#{keys}')
+        page.goto(f'{base}#{keys}')
         assert '#' not in page.url, 'keys left in the URL hash'
         page.screenshot(path=str(OUT / '0_idle.png'))
         page.click('#main-btn')

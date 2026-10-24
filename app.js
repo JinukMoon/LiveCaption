@@ -147,8 +147,9 @@
     document.documentElement.style.setProperty('--scale', load(LS.scale, '1'));
   }
 
+  // Scribe runs with language_code=en, so any Hangul means the speaker switched to Korean.
   function isKorean(text) {
-    return (text.match(/[가-힣]/g) || []).length >= 2;
+    return /[가-힣]/.test(text);
   }
 
   // ─── caption feed ───
