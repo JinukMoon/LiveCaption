@@ -16,6 +16,8 @@
 - 원본: `/home/jumoon/99_usefull/11_English/API-Key` (ElevenLabs, Gemini 두 줄 구조). 앱은 브라우저 localStorage에만 저장.
 - 설정 링크 + QR은 `private/`(gitignore)에 만든다.
 - 이 ElevenLabs 키는 **speech_to_text 권한만** 있다(TTS·user_read는 401). 앱엔 충분.
+  구독·잔여 크레딧은 못 보지만 사용량은 된다: `GET /v1/usage/character-stats?start_unix=<ms>&end_unix=<ms>&aggregation_interval=day&metric=minutes_used`
+  (`metric` 빼면 크레딧). 2026-10-24(UTC)까지 테스트 누적 STT 80.4분 = 4,869 크레딧(약 61 크레딧/분).
 - Gemini 키는 2026-10-24 기준 **선불 크레딧 소진(402)** → 앱은 자동으로 Google 번역(gtx, 키 없음)으로 대체.
   충전되면 저절로 Gemini로 돌아온다(10분 쿨다운 후 재시도).
 
