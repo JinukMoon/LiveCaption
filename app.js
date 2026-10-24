@@ -555,7 +555,8 @@
   }
 
   // Drop the current socket and connect again: stale after backgrounding, stuck handshake, or backed-up sends.
-  function recycle() {
+  // planned=true (session rollover) reconnects at once and keeps the status as is: nothing went wrong.
+  function recycle(planned = false) {
     const sock = ws;
     if (!sock || !running) return;
     ws = null;
@@ -567,7 +568,8 @@
     flushLive();
     prevText = lastEnglishTail();
     reconnectDelay = 500;
-    retry();
+    if (planned) connect();
+    else retry();
   }
 
   function onMessage(d) {
@@ -585,7 +587,7 @@
       case 'committed_transcript':
         commitText(d.text);
         // Just after a commit nothing is pending, so a fresh session here cuts no sentence in half.
-        if (Date.now() - sessionAt > rolloverMs) recycle();
+        if (Date.now() - sessionAt > rolloverMs) recycle(true);
         break;
       case 'auth_error':
         fail('ElevenLabs 인증 오류: ' + d.error);
