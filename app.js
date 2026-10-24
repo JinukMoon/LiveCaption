@@ -729,7 +729,11 @@
   }
 
   function warnNoWakeLock() {
-    notice('화면 꺼짐 방지가 안 돼요 · 아이폰 설정 > 디스플레이 및 밝기 > 자동 잠금을 "안 함"으로 두세요');
+    notice(
+      /iPhone|iPad|iPod/.test(navigator.userAgent)
+        ? '화면 꺼짐 방지가 안 돼요 · 설정 > 디스플레이 및 밝기 > 자동 잠금을 "안 함"으로 두세요'
+        : '화면 꺼짐 방지가 안 돼요 · 설정 > 디스플레이 > 화면 자동 꺼짐 시간을 가장 길게 두세요'
+    );
   }
 
   function releaseWakeLock() {

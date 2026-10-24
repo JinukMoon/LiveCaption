@@ -49,7 +49,7 @@ def main():
             f'--use-file-for-fake-audio-capture={wav}%noloop',
             '--autoplay-policy=no-user-gesture-required',
         ])
-        ctx = browser.new_context(**p.devices['iPhone 13'], permissions=['microphone'])
+        ctx = browser.new_context(**p.devices['Galaxy S24'], permissions=['microphone'])
         page = ctx.new_page()
         page.on('console', lambda m: log['console'].append(f'{m.type}: {m.text}'))
         page.on('pageerror', lambda e: log['console'].append(f'pageerror: {e}'))
