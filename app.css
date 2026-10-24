@@ -153,9 +153,23 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 /* ── bottom button ── */
 footer {
+  display: flex;
+  gap: 8px;
   padding: 10px 16px calc(env(safe-area-inset-bottom) + 12px);
   border-top: 1px solid var(--line);
 }
+footer .main { flex: 1; width: auto; }
+
+.side {
+  flex: 0 0 64px;
+  height: 56px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+.side:disabled { opacity: 0.35; }
 
 .main {
   width: 100%;
@@ -200,11 +214,3 @@ dialog input[type=range] { width: 100%; accent-color: var(--accent); }
 .note:empty { display: none; }
 .row { display: flex; gap: 10px; margin-top: 20px; }
 .row .main { height: 48px; flex: 1; }
-.ghost {
-  flex: 0 0 auto;
-  padding: 0 16px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: none;
-  color: var(--dim);
-}

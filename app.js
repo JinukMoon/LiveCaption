@@ -128,9 +128,11 @@
   }
 
   let noticeTimer = null;
-  function notice(msg, kind = 'warn', ms = 0) {
+  let noticeTap = null; // what tapping the current notice does besides dismissing it
+  function notice(msg, kind = 'warn', ms = 0, onTap = null) {
     const el = $('notice');
     clearTimeout(noticeTimer);
+    noticeTap = onTap;
     if (!msg) {
       el.hidden = true;
       return;
@@ -138,7 +140,7 @@
     el.textContent = msg;
     el.className = kind;
     el.hidden = false;
-    if (ms) noticeTimer = setTimeout(() => (el.hidden = true), ms);
+    if (ms) noticeTimer = setTimeout(() => notice(''), ms);
   }
 
   function setEngine(name, reason = '') {
@@ -170,6 +172,10 @@
     document.documentElement.style.setProperty('--scale', load(LS.scale, '1'));
   }
 
+  function stamp(t) {
+    return new Date(t).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
   // Scribe runs with language_code=en, so any Hangul means the speaker switched to Korean.
   function isKorean(text) {
     return /[가-힣]/.test(text);
@@ -195,6 +201,7 @@
       ? '듣고 있어요<br>말소리가 들리면 여기에 자막이 나와요'
       : '폰을 소리 나는 쪽에 두고<br><b>듣기 시작</b>을 누르세요';
     $('empty-key').hidden = !!elKey();
+    $('clear-btn').disabled = $('share-btn').disabled = !segments.length;
   }
 
   function segNode(seg) {
@@ -279,6 +286,52 @@
     // A translation still in flight when the page was closed never arrived.
     for (const s of segments) if (!s.divider && s.en && !s.ko) s.failed = true;
     renderAll();
+  }
+
+  // New talk or meeting: empty the feed while listening goes on. The notice undoes it for a few seconds.
+  function clearFeed() {
+    if (!segments.length) return;
+    const old = segments;
+    segments = [];
+    renderAll();
+    persistNow();
+    notice('자막을 지웠어요 · 여기를 탭하면 되돌려요', 'info', 8000, () => {
+      segments = old.concat(segments);
+      renderAll();
+      persistNow();
+    });
+  }
+
+  // The whole feed as plain text: Korean, then the English it came from.
+  function transcript() {
+    const parts = ['LiveCaption · ' + stamp(segments[0].t)];
+    segments.forEach((s, i) => {
+      if (s.divider) {
+        if (i) parts.push('── ' + s.divider + ' ──');
+      } else {
+        parts.push([s.ko, s.en].filter(Boolean).join('\n'));
+      }
+    });
+    return parts.join('\n\n');
+  }
+
+  async function share() {
+    if (!segments.length) return;
+    const text = transcript();
+    if (navigator.share) {
+      try {
+        await navigator.share({ text });
+        return;
+      } catch (e) {
+        if (e.name === 'AbortError') return; // share sheet closed
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      notice('자막 전체를 복사했어요 · 카톡 등에 붙여넣으세요', 'info', 4000);
+    } catch (e) {
+      notice('공유할 수 없어요', 'warn', 4000);
+    }
   }
 
   // ─── transcripts ───
@@ -766,8 +819,7 @@
     notice('');
     const last = segments[segments.length - 1];
     if (last && !last.divider) {
-      const label = new Date().toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-      addSegment({ divider: label, t: Date.now() });
+      addSegment({ divider: stamp(Date.now()), t: Date.now() });
       persist();
     }
     setMainBtn();
@@ -888,13 +940,6 @@
   $('font').addEventListener('input', () => {
     document.documentElement.style.setProperty('--scale', $('font').value);
   });
-  $('clear-btn').addEventListener('click', () => {
-    if (!confirm('자막 기록을 모두 지울까요?')) return;
-    segments = [];
-    renderAll();
-    persistNow();
-  });
-
   // Setup link: …/LiveCaption/#el=<ElevenLabs key>&gm=<Gemini key>. The hash never reaches the server.
   function importKeysFromHash() {
     const h = new URLSearchParams(location.hash.slice(1));
@@ -909,7 +954,13 @@
 
   $('main-btn').addEventListener('click', () => (running ? stop() : start()));
   $('settings-btn').addEventListener('click', openSettings);
-  $('notice').addEventListener('click', () => notice(''));
+  $('clear-btn').addEventListener('click', clearFeed);
+  $('share-btn').addEventListener('click', share);
+  $('notice').addEventListener('click', () => {
+    const tap = noticeTap;
+    notice('');
+    if (tap) tap();
+  });
   $('jump').addEventListener('click', () => {
     feed.scrollTop = feed.scrollHeight;
     $('jump').hidden = true;
@@ -919,7 +970,7 @@
   });
   // click (not pointerdown) counts as a user activation that lets iOS start audio; scrolling doesn't fire it.
   document.addEventListener('click', (e) => {
-    if (!resumeOnTap || running || e.target.closest('#settings, #settings-btn, #main-btn')) return;
+    if (!resumeOnTap || running || e.target.closest('#settings, #settings-btn, #main-btn, .side')) return;
     start();
   });
   document.addEventListener('visibilitychange', () => {

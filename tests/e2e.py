@@ -50,6 +50,8 @@ def main():
             '--autoplay-policy=no-user-gesture-required',
         ])
         ctx = browser.new_context(**p.devices['Galaxy S24'], permissions=['microphone'])
+        # Capture what the share button hands to the system share sheet.
+        ctx.add_init_script('navigator.share = (d) => { window.__shared = d.text; return Promise.resolve(); };')
         page = ctx.new_page()
         page.on('console', lambda m: log['console'].append(f'{m.type}: {m.text}'))
         page.on('pageerror', lambda e: log['console'].append(f'pageerror: {e}'))
@@ -104,11 +106,29 @@ def main():
         log['segments'] = page.evaluate("""() => [...document.querySelectorAll('#segments > div')].map(d =>
             d.classList.contains('divider') ? {divider: d.textContent} :
             {ko: d.querySelector('.ko').textContent, en: d.querySelector('.en').textContent})""")
-        log['stored'] = len(json.loads(page.evaluate("localStorage.getItem('lc_segments') || '[]'")))
+        stored = lambda: len(json.loads(page.evaluate("localStorage.getItem('lc_segments') || '[]'")))
+        count = lambda: page.evaluate("document.querySelectorAll('#segments .seg').length")
+        log['stored'] = stored()
+
+        # Share hands over every caption as text.
+        page.click('#share-btn')
+        shared = page.evaluate('window.__shared') or ''
+        texts = [s for s in log['segments'] if 'en' in s]
+        log['share'] = {'chars': len(shared), 'head': shared.split('\n')[0],
+                        'all_segments_in': all(s['en'] in shared and s['ko'] in shared for s in texts)}
+
+        # Clear empties the feed and the storage; tapping the notice undoes it.
+        before = count()
+        page.click('#clear-btn')
+        log['clear'] = {'before': before, 'after': count(), 'stored_after': stored(),
+                        'buttons_disabled': page.evaluate("document.getElementById('share-btn').disabled")}
+        page.screenshot(path=str(OUT / '4_cleared.png'))
+        page.click('#notice')
+        log['clear'].update(undone=count(), stored_undone=stored())
 
         # A reload must bring the captions back.
         page.reload()
-        log['restored'] = page.evaluate("document.querySelectorAll('#segments .seg').length")
+        log['restored'] = count()
 
         # A setup link pasted into the key field fills both keys.
         page.click('#settings-btn')
@@ -118,7 +138,8 @@ def main():
         browser.close()
 
     (OUT / 'log.json').write_text(json.dumps(log, ensure_ascii=False, indent=1))
-    print(json.dumps({k: log[k] for k in ('sent_chunks', 'stored', 'restored', 'paste')}, ensure_ascii=False))
+    print(json.dumps({k: log[k] for k in ('sent_chunks', 'stored', 'restored', 'paste', 'share', 'clear')},
+                     ensure_ascii=False))
     for s in log['segments']:
         print(s)
     print('--- server events')
