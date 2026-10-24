@@ -1,0 +1,37 @@
+# 64_listening_app — LiveCaption
+
+실시간 영어 STT + 한국어 번역 폰 웹앱 (2026-10-24~). 사용 설명은 `README.md`.
+
+- **배포**: 이 폴더가 곧 repo `JinukMoon/LiveCaption` (`main` 루트 → GitHub Pages
+  https://jinukmoon.github.io/LiveCaption/). 빌드 없음, 파일 고치고 push하면 끝.
+- **범위**: 사용자 지시로 기능은 "들리는 영어 → 실시간 텍스트 → 한국어 번역"만. 말하기 피드백·TTS·요약 같은
+  학습 기능은 넣지 않는다(2026-10-24). 실전 사용성이 최우선.
+- **사용 기기**: 폰만(아이폰). Zoom도 노트북 스피커 옆에 폰을 두는 방식. 시스템 오디오 캡처는 필요 없음.
+- **커밋**: 작성자·Co-Authored-By에 Claude 넣지 않는다.
+
+## 키 (repo에 절대 넣지 말 것)
+
+- 원본: `/home/jumoon/99_usefull/11_English/API-Key` (ElevenLabs, Gemini 두 줄 구조). 앱은 브라우저 localStorage에만 저장.
+- 설정 링크 + QR은 `private/`(gitignore)에 만든다.
+- 이 ElevenLabs 키는 **speech_to_text 권한만** 있다(TTS·user_read는 401). 앱엔 충분.
+- Gemini 키는 2026-10-24 기준 **선불 크레딧 소진(402)** → 앱은 자동으로 Google 번역(gtx, 키 없음)으로 대체.
+  충전되면 저절로 Gemini로 돌아온다(10분 쿨다운 후 재시도).
+
+## Scribe v2 Realtime 실측 메모 (2026-10-24)
+
+- 브라우저에서 `POST /v1/single-use-token/realtime_scribe`(xi-api-key) 직접 호출 가능(CORS `*`). 토큰 15분 유효, 접속에만 씀.
+- WS 파라미터: `commit_strategy=vad`, `vad_silence_threshold_secs=0.8`, `language_code=en`, `keyterms` 반복 파라미터.
+- **keyterms는 하나라도 20자 넘으면 세션 전체가 `invalid_request`로 닫힌다** → 앱에서 20자 이하·50개로 거른다.
+- `previous_text`는 세션 첫 chunk에만 허용(재연결 때 직전 문장 꼬리 50자를 넣는다).
+- 쉬지 않고 길게 말하면 15초 넘게 커밋이 안 됨 → 부분 자막을 8단어 이상·5단어 증가·1.5초 간격으로 미리 번역.
+- `language_code=en`이어도 한국어 발화는 한국어로 받아 적는다 → 한글 2자 이상이면 번역 생략.
+
+## 테스트
+
+```bash
+. <키 export 스크립트>   # EL_KEY, GM_KEY
+~/miniconda3/envs/toolkit/bin/python tests/e2e.py tests/test.wav 75
+```
+`tests/test.wav`(gitignore)는 16 kHz mono 아무 영어 음성이면 된다. 처음 만든 건 46_Listening TED 클립 13초 +
+15_english_paper_writing 5차시 강의 50초를 이은 것. 결과 스크린샷·로그는 `tests/out/`.
+실기기(아이폰 Safari/홈 화면 앱)의 마이크 끊김·Wake Lock 동작은 이 테스트로 못 본다 — 실제 폰에서 확인.

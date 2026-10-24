@@ -1,0 +1,4 @@
+private/
+tests/*.wav
+tests/out/
+__pycache__/
