@@ -29,22 +29,34 @@
     'hydrogen evolution reaction', 'oxygen evolution reaction',
   ].join(', ');
 
-  const VAD_SILENCE_SECS = 0.8; // pause that closes a sentence
-  const QUEUE_MAX = 80; // 100 ms chunks kept while (re)connecting = 8 s
-  const KEEP_SEGMENTS = 400;
-  const PROVISIONAL_MIN_WORDS = 8; // shorter sentences are committed before this matters
+  const TOKEN_URL = 'https://api.elevenlabs.io/v1/single-use-token/realtime_scribe';
+  const STT_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
+  const VAD_SILENCE_SECS = 0.8; // pause that closes a segment
+  const QUEUE_MAX = 150; // 100 ms chunks kept while (re)connecting = 15 s
+  const MAX_BUFFERED = 512 * 1024; // unsent bytes that mean the socket is dead or hopelessly slow
+  const KEEP_SEGMENTS = 1500; // ~3 h of lecture
+  const PROVISIONAL_MIN_WORDS = 8; // shorter sentences are finished before this matters
   const PROVISIONAL_STEP_WORDS = 5;
   const PROVISIONAL_GAP_MS = 1500;
+  // A sentence inside a partial is handed over once this many words follow it;
+  // Scribe may still revise the last few words of a partial.
+  const STABLE_WORDS = 5;
+  const SENTENCE_END = /[.?!]["'’”)\]]?$/;
+  const ABBREV = /^(?:Dr|Mr|Mrs|Ms|Prof|St|Jr|vs|etc|al|Fig|Figs|Eq|Eqs|Ref|Refs|No|approx|ca|cf|e\.g|i\.e|a\.m|p\.m|U\.S)\.$/i;
 
   // ─── storage ───
 
-  function load(k, d = '') {
+  function raw(k) {
     try {
-      const v = localStorage.getItem(k);
-      return v === null ? d : v;
+      return localStorage.getItem(k);
     } catch (e) {
-      return d;
+      return null;
     }
+  }
+
+  function load(k, d = '') {
+    const v = raw(k);
+    return v === null ? d : v;
   }
 
   function save(k, v) {
@@ -55,8 +67,9 @@
     }
   }
 
-  const elKey = () => load(LS.el) || load(LEGACY.el);
-  const gmKey = () => load(LS.gm) || load(LEGACY.gm);
+  // The legacy key is used only until this app has saved its own (even an empty one).
+  const elKey = () => raw(LS.el) ?? load(LEGACY.el);
+  const gmKey = () => raw(LS.gm) ?? load(LEGACY.gm);
   const gmModel = () => load(LS.model) || DEFAULT_MODEL;
 
   function termList() {
@@ -73,19 +86,24 @@
   // ─── state ───
 
   let running = false;
+  let session = 0; // bumped by start/stop so late async results from an old run are dropped
+  let connGen = 0; // bumped by every connect attempt and by stop
   let ws = null;
   let reconnectTimer = null;
   let reconnectDelay = 500;
+  let failures = 0;
   let queue = [];
   let prevText = ''; // context for the first chunk after a reconnect
   let audio = null; // { ctx, stream, node }
   let lastChunkAt = 0;
+  let hiddenAt = 0;
   let wakeLock = null;
+  let wakePending = false;
   let startedAt = 0;
   let tickTimer = null;
   let resumeOnTap = false;
 
-  let segments = []; // { en, ko, t } or { divider, t }
+  let segments = []; // { en, ko, ph, t } or { divider, t }
   const nodes = new WeakMap();
   let live = newLive();
 
@@ -93,8 +111,9 @@
   let gmTimeouts = 0;
   let engine = { name: '', reason: '' };
 
-  function newLive() {
-    return { en: '', ko: '', words: 0, at: 0, busy: false };
+  // en: unfinished text shown live; done: words of the current server segment already handed over.
+  function newLive(done = 0) {
+    return { en: '', ko: '', done, words: 0, at: 0, busy: false };
   }
 
   // ─── small UI helpers ───
@@ -191,26 +210,25 @@
     return div;
   }
 
-  function fillSeg(seg, placeholder = '') {
+  function fillSeg(seg) {
     const div = nodes.get(seg);
     if (!div || seg.divider) return;
     const stick = atBottom();
     const ko = div.firstChild;
-    ko.textContent = seg.ko || (seg.failed ? '번역 실패 · 탭해서 다시' : placeholder || '…');
+    ko.textContent = seg.ko || (seg.failed ? '번역 실패 · 탭해서 다시' : seg.ph || '…');
     ko.classList.toggle('pending', !seg.ko);
     div.lastChild.textContent = seg.en;
     keepPosition(stick);
   }
 
-  function addSegment(seg, placeholder) {
+  function addSegment(seg) {
     const stick = atBottom();
     segments.push(seg);
     const box = $('segments');
     box.appendChild(segNode(seg));
-    if (placeholder) fillSeg(seg, placeholder);
-    if (segments.length > KEEP_SEGMENTS + 50) {
-      segments.splice(0, 50);
-      for (let i = 0; i < 50 && box.firstChild; i++) box.removeChild(box.firstChild);
+    if (segments.length > KEEP_SEGMENTS + 100) {
+      segments.splice(0, 100);
+      for (let i = 0; i < 100 && box.firstChild; i++) box.removeChild(box.firstChild);
     }
     updateEmpty();
     keepPosition(stick);
@@ -235,20 +253,25 @@
   }
 
   let persistTimer = null;
+  function persistNow() {
+    clearTimeout(persistTimer);
+    const keep = segments.slice(-KEEP_SEGMENTS).map(({ en, ko, divider, t }) => ({ en, ko, divider, t }));
+    save(LS.segs, JSON.stringify(keep));
+  }
+
   function persist() {
     clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      const keep = segments.slice(-KEEP_SEGMENTS).map(({ en, ko, divider, t }) => ({ en, ko, divider, t }));
-      save(LS.segs, JSON.stringify(keep));
-    }, 400);
+    persistTimer = setTimeout(persistNow, 400);
   }
 
   function restore() {
+    let stored = [];
     try {
-      segments = JSON.parse(load(LS.segs, '[]')) || [];
+      stored = JSON.parse(load(LS.segs, '[]'));
     } catch (e) {
-      segments = [];
+      /* corrupted; start empty */
     }
+    segments = Array.isArray(stored) ? stored : [];
     // A translation still in flight when the page was closed never arrived.
     for (const s of segments) if (!s.divider && s.en && !s.ko) s.failed = true;
     renderAll();
@@ -257,25 +280,39 @@
   // ─── transcripts ───
 
   function onPartial(text) {
-    live.en = text;
+    const words = text.split(/\s+/).filter(Boolean);
+    // Lectures rarely pause long enough for a VAD commit, so hand over finished sentences as soon as they are stable.
+    let cut = live.done;
+    for (let i = live.done; i < words.length - STABLE_WORDS; i++) {
+      if (SENTENCE_END.test(words[i]) && !ABBREV.test(words[i])) cut = i + 1;
+    }
+    if (cut > live.done) {
+      const finished = words.slice(live.done, cut).join(' ');
+      live = newLive(cut); // also orphans any provisional translation of the old remainder
+      emitSegment(finished);
+    }
+    live.en = words.slice(live.done).join(' ');
     renderLive();
+    maybeProvisional();
+  }
 
+  // Long sentence still being spoken: show a provisional translation of what is there so far.
+  function maybeProvisional() {
     const L = live;
-    const words = text.split(/\s+/).filter(Boolean).length;
+    const words = L.en ? L.en.split(' ').length : 0;
     if (
       L.busy ||
-      isKorean(text) ||
+      isKorean(L.en) ||
       words < PROVISIONAL_MIN_WORDS ||
       words - L.words < PROVISIONAL_STEP_WORDS ||
       Date.now() - L.at < PROVISIONAL_GAP_MS
     ) {
       return;
     }
-    // Long sentence still being spoken: show a provisional translation so far.
     L.busy = true;
     L.words = words;
     L.at = Date.now();
-    translate(text, recentContext(segments.length)).then((ko) => {
+    translate(L.en, recentContext(segments.length)).then((ko) => {
       L.busy = false;
       if (L === live && ko) {
         live.ko = ko;
@@ -284,21 +321,31 @@
     });
   }
 
+  // Server closed a segment: the words not already handed over as sentences become the last piece.
   function commitText(text) {
-    text = (text || '').trim();
-    const placeholder = live.ko;
-    live = newLive();
-    renderLive();
-    if (!text) return;
-    const korean = isKorean(text);
-    const seg = { en: korean ? '' : text, ko: korean ? text : '', t: Date.now() };
-    addSegment(seg, placeholder);
-    if (!korean) translateSeg(seg);
-    persist();
+    const words = (text || '').split(/\s+/).filter(Boolean);
+    finishLive(words.slice(live.done).join(' '));
   }
 
   function flushLive() {
-    if (live.en) commitText(live.en);
+    if (live.en) finishLive(live.en);
+  }
+
+  function finishLive(rest) {
+    const placeholder = live.ko;
+    live = newLive();
+    renderLive();
+    emitSegment(rest, placeholder);
+  }
+
+  function emitSegment(text, placeholder = '') {
+    text = text.trim();
+    if (!text) return;
+    const korean = isKorean(text);
+    const seg = { en: korean ? '' : text, ko: korean ? text : '', ph: placeholder, t: Date.now() };
+    addSegment(seg);
+    if (!korean) translateSeg(seg);
+    persist();
   }
 
   // English of the two sentences before index i, to disambiguate fragments.
@@ -311,9 +358,11 @@
   }
 
   async function translateSeg(seg) {
+    const i = segments.indexOf(seg);
+    if (i < 0) return; // history was cleared or trimmed meanwhile
     seg.failed = false;
     fillSeg(seg);
-    const ko = await translate(seg.en, recentContext(segments.indexOf(seg)));
+    const ko = await translate(seg.en, recentContext(i));
     seg.ko = ko;
     seg.failed = !ko;
     fillSeg(seg);
@@ -434,25 +483,24 @@
 
   async function connect() {
     clearTimeout(reconnectTimer);
+    const gen = ++connGen;
     if (!running) return;
     let token;
     try {
-      const res = await fetchTimeout(
-        'https://api.elevenlabs.io/v1/single-use-token/realtime_scribe',
-        { method: 'POST', headers: { 'xi-api-key': elKey() } },
-        8000
-      );
+      const res = await fetchTimeout(TOKEN_URL, { method: 'POST', headers: { 'xi-api-key': elKey() } }, 8000);
+      if (gen !== connGen) return;
       if (res.status === 401 || res.status === 403) {
         fail(`ElevenLabs 키가 거부됐어요 (${res.status}). 설정에서 키를 확인하세요.`);
         return;
       }
       if (!res.ok) throw new Error('token ' + res.status);
       token = (await res.json()).token;
+      if (!token) throw new Error('no token');
     } catch (e) {
-      retry();
+      if (gen === connGen) retry();
       return;
     }
-    if (!running) return;
+    if (gen !== connGen || !running) return;
 
     const p = new URLSearchParams({
       model_id: 'scribe_v2_realtime',
@@ -464,9 +512,14 @@
     });
     for (const t of sttTerms()) p.append('keyterms', t);
 
-    const sock = new WebSocket('wss://api.elevenlabs.io/v1/speech-to-text/realtime?' + p);
+    const sock = new WebSocket(STT_URL + '?' + p);
     ws = sock;
+    // A handshake the network swallows can hang for a minute before onclose.
+    const openTimer = setTimeout(() => {
+      if (ws === sock && sock.readyState === WebSocket.CONNECTING) recycle();
+    }, 8000);
     sock.onopen = () => {
+      clearTimeout(openTimer);
       if (ws !== sock) return;
       const q = queue;
       queue = [];
@@ -476,6 +529,7 @@
       if (ws === sock) onMessage(JSON.parse(ev.data));
     };
     sock.onclose = () => {
+      clearTimeout(openTimer);
       if (ws !== sock) return;
       ws = null;
       flushLive();
@@ -488,15 +542,35 @@
 
   function retry() {
     if (!running) return;
+    failures++;
     setStatus('connecting', '재연결 중');
+    if (failures >= 4) notice('연결이 계속 끊겨요 · 와이파이나 데이터 연결을 확인하세요');
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 5000);
   }
 
+  // Drop the current socket and connect again: stale after backgrounding, stuck handshake, or backed-up sends.
+  function recycle() {
+    const sock = ws;
+    if (!sock || !running) return;
+    ws = null;
+    try {
+      sock.close();
+    } catch (e) {
+      /* already closed */
+    }
+    flushLive();
+    prevText = lastEnglishTail();
+    reconnectDelay = 500;
+    retry();
+  }
+
   function onMessage(d) {
     switch (d.message_type) {
       case 'session_started':
+        if (failures >= 4) notice('');
+        failures = 0;
         reconnectDelay = 500;
         setStatus('live', '듣는 중');
         break;
@@ -547,6 +621,7 @@
   function onAudio(buf) {
     lastChunkAt = Date.now();
     const b64 = toBase64(buf);
+    if (ws && ws.readyState === WebSocket.OPEN && ws.bufferedAmount > MAX_BUFFERED) recycle();
     if (ws && ws.readyState === WebSocket.OPEN) {
       sendChunk(b64);
     } else {
@@ -557,18 +632,45 @@
 
   // ─── microphone ───
 
-  async function startAudio(ctx) {
+  async function startAudio(ctx, my) {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: false, noiseSuppression: true, autoGainControl: true },
     });
-    await ctx.audioWorklet.addModule('worklet.js');
-    const node = new AudioWorkletNode(ctx, 'pcm16k');
-    node.port.onmessage = (e) => onAudio(e.data);
-    ctx.createMediaStreamSource(stream).connect(node);
-    node.connect(ctx.destination); // keeps the node pulled on every browser; it outputs silence
-    if (ctx.state !== 'running') await ctx.resume();
-    audio = { ctx, stream, node };
-    if (!running) stopAudio(); // stopped while the permission prompt was open
+    try {
+      if (my !== session) throw new Error('stale');
+      await ctx.audioWorklet.addModule('worklet.js');
+      if (my !== session) throw new Error('stale');
+      const node = new AudioWorkletNode(ctx, 'pcm16k');
+      node.port.onmessage = (e) => {
+        if (my === session) onAudio(e.data);
+      };
+      ctx.createMediaStreamSource(stream).connect(node);
+      node.connect(ctx.destination); // keeps the node pulled on every browser; it outputs silence
+      ctx.resume().catch(() => {}); // not fatal: the watchdog notices if audio never flows
+      audio = { ctx, stream, node };
+      watchTrack(stream.getAudioTracks()[0], my);
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw e;
+    }
+  }
+
+  // A call, Siri, or another app can mute the mic without ending it; the worklet then sends silence.
+  function watchTrack(track, my) {
+    if (!track) return;
+    track.onended = () => {
+      if (my === session) micLost();
+    };
+    track.onmute = () => {
+      if (my !== session) return;
+      setStatus('error', '마이크 막힘');
+      notice('마이크가 잠시 막혔어요 (통화·다른 앱). 풀리면 자동으로 이어져요');
+    };
+    track.onunmute = () => {
+      if (my !== session) return;
+      notice('');
+      if (ws && ws.readyState === WebSocket.OPEN) setStatus('live', '듣는 중');
+    };
   }
 
   function stopAudio() {
@@ -579,29 +681,48 @@
     audio = null;
   }
 
-  // iOS cuts the mic when the screen locks, another app takes audio, or a call comes in.
+  // iOS stops audio when the screen locks or the app is backgrounded; a tap is needed to restart it.
   function watchdog() {
     if (!running || !audio) return;
     const silentFor = Date.now() - lastChunkAt;
     if (silentFor < 2500) return;
     if (audio.ctx.state !== 'running') audio.ctx.resume().catch(() => {});
-    const track = audio.stream.getAudioTracks()[0];
-    if (!track || track.readyState === 'ended' || silentFor > 6000) {
-      stop();
-      resumeOnTap = true;
-      notice('마이크가 끊겼어요 · 화면을 탭하면 다시 들어요');
-      setStatus('error', '끊김');
-    }
+    if (silentFor > 6000) micLost();
+  }
+
+  function micLost() {
+    stop();
+    resumeOnTap = true;
+    notice('마이크가 끊겼어요 · 화면을 탭하면 다시 들어요');
+    setStatus('error', '끊김');
   }
 
   async function acquireWakeLock() {
-    if (!('wakeLock' in navigator) || wakeLock) return;
-    try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => (wakeLock = null));
-    } catch (e) {
-      /* not allowed right now; retried when the page is visible again */
+    if (wakeLock || wakePending) return;
+    if (!('wakeLock' in navigator)) {
+      warnNoWakeLock();
+      return;
     }
+    wakePending = true;
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      if (!running) {
+        lock.release().catch(() => {});
+        return;
+      }
+      wakeLock = lock;
+      lock.addEventListener('release', () => {
+        if (wakeLock === lock) wakeLock = null;
+      });
+    } catch (e) {
+      if (document.visibilityState === 'visible') warnNoWakeLock();
+    } finally {
+      wakePending = false;
+    }
+  }
+
+  function warnNoWakeLock() {
+    notice('화면 꺼짐 방지가 안 돼요 · 아이폰 설정 > 디스플레이 및 밝기 > 자동 잠금을 "안 함"으로 두세요');
   }
 
   function releaseWakeLock() {
@@ -621,10 +742,12 @@
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     ctx.resume().catch(() => {});
 
+    const my = ++session;
     running = true;
     resumeOnTap = false;
     queue = [];
     prevText = '';
+    failures = 0;
     reconnectDelay = 500;
     live = newLive();
     notice('');
@@ -646,9 +769,10 @@
 
     connect();
     try {
-      await startAudio(ctx);
+      await startAudio(ctx, my);
     } catch (e) {
       ctx.close().catch(() => {});
+      if (my !== session) return;
       fail(
         e.name === 'NotAllowedError'
           ? '마이크 권한이 필요해요. 브라우저 설정에서 이 사이트의 마이크를 허용해 주세요.'
@@ -660,6 +784,8 @@
   function stop() {
     if (!running) return;
     running = false;
+    session++;
+    connGen++;
     clearTimeout(reconnectTimer);
     clearInterval(tickTimer);
     const sock = ws;
@@ -672,6 +798,7 @@
       }
     }
     flushLive();
+    persistNow();
     stopAudio();
     queue = [];
     releaseWakeLock();
@@ -752,7 +879,7 @@
     if (!confirm('자막 기록을 모두 지울까요?')) return;
     segments = [];
     renderAll();
-    persist();
+    persistNow();
   });
 
   // Setup link: …/LiveCaption/#el=<ElevenLabs key>&gm=<Gemini key>. The hash never reaches the server.
@@ -769,6 +896,7 @@
 
   $('main-btn').addEventListener('click', () => (running ? stop() : start()));
   $('settings-btn').addEventListener('click', openSettings);
+  $('notice').addEventListener('click', () => notice(''));
   $('jump').addEventListener('click', () => {
     feed.scrollTop = feed.scrollHeight;
     $('jump').hidden = true;
@@ -776,18 +904,33 @@
   feed.addEventListener('scroll', () => {
     if (atBottom()) $('jump').hidden = true;
   });
-  document.addEventListener('pointerdown', (e) => {
+  // click (not pointerdown) counts as a user activation that lets iOS start audio; scrolling doesn't fire it.
+  document.addEventListener('click', (e) => {
     if (!resumeOnTap || running || e.target.closest('#settings, #settings-btn, #main-btn')) return;
     start();
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible' || !running) return;
+    if (document.visibilityState === 'hidden') {
+      hiddenAt = Date.now();
+      persistNow();
+      return;
+    }
+    if (!running) return;
     acquireWakeLock();
     if (audio) {
       // Timers were frozen in the background; give the mic a moment to come back before the watchdog judges it.
       lastChunkAt = Math.max(lastChunkAt, Date.now() - 2000);
       audio.ctx.resume().catch(() => {});
     }
+    // A socket that lived through a suspended page may be half-open: nothing errors, nothing arrives.
+    if (hiddenAt && Date.now() - hiddenAt > 3000) recycle();
+    hiddenAt = 0;
+  });
+  window.addEventListener('pagehide', persistNow);
+  window.addEventListener('online', () => {
+    if (!running) return;
+    if (ws) recycle();
+    else connect();
   });
 
   importKeysFromHash();

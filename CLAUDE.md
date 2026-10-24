@@ -23,7 +23,10 @@
 - WS 파라미터: `commit_strategy=vad`, `vad_silence_threshold_secs=0.8`, `language_code=en`, `keyterms` 반복 파라미터.
 - **keyterms는 하나라도 20자 넘으면 세션 전체가 `invalid_request`로 닫힌다** → 앱에서 20자 이하·50개로 거른다.
 - `previous_text`는 세션 첫 chunk에만 허용(재연결 때 직전 문장 꼬리 50자를 넣는다).
-- 쉬지 않고 길게 말하면 15초 넘게 커밋이 안 됨 → 부분 자막을 8단어 이상·5단어 증가·1.5초 간격으로 미리 번역.
+- 쉬지 않고 길게 말하면(강의) VAD 커밋이 15초 넘게 안 옴 → 앱이 부분 자막 안의 문장 끝(. ? !, 약어 제외)을
+  **뒤에 5단어가 더 붙어 안정되면** 문장 단위로 확정·번역한다(`live.done` = 이미 넘긴 단어 수, 커밋 때 그만큼 잘라냄).
+  Scribe는 부분 자막의 끝 몇 토큰(`max_tokens_to_recompute: 5`)만 고쳐 쓰므로 그 앞은 안정적이다.
+  남은 미완성 문장은 8단어 이상·5단어 증가·1.5초 간격으로 미리 번역(회색).
 - `language_code=en`이어도 한국어 발화는 한국어로 받아 적는다 → 한글이 한 글자라도 있으면 번역 생략.
 
 ## 테스트
@@ -32,6 +35,7 @@
 . <키 export 스크립트>   # EL_KEY, GM_KEY
 ~/miniconda3/envs/toolkit/bin/python tests/e2e.py tests/test.wav 75
 ```
-`tests/test.wav`(gitignore)는 16 kHz mono 아무 영어 음성이면 된다. 처음 만든 건 46_Listening TED 클립 13초 +
-15_english_paper_writing 5차시 강의 50초를 이은 것. 결과 스크린샷·로그는 `tests/out/`.
+`tests/*.wav`(gitignore)는 16 kHz mono 아무 음성이면 된다. `test.wav` = 46_Listening TED 클립 13초 +
+15_english_paper_writing 5차시 강의 50초(한국어 섞임), `lecture.wav` = TED `jM5MIRDCL-8` 120–230초
+(쉬지 않는 강연, 문장 단위 끊기 확인용). 결과 스크린샷·로그는 `tests/out/`. 30초에 테스트가 소켓을 일부러 끊는다.
 실기기(아이폰 Safari/홈 화면 앱)의 마이크 끊김·Wake Lock 동작은 이 테스트로 못 본다 — 실제 폰에서 확인.
