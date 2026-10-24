@@ -34,6 +34,8 @@
   const VAD_SILENCE_SECS = 0.8; // pause that closes a segment
   const QUEUE_MAX = 150; // 100 ms chunks kept while (re)connecting = 15 s
   const MAX_BUFFERED = 512 * 1024; // unsent bytes that mean the socket is dead or hopelessly slow
+  // Scribe ended a session after ~19 min in testing (clean close, no error). Switch earlier, at a pause.
+  const ROLLOVER_MS = 15 * 60e3;
   const KEEP_SEGMENTS = 1500; // ~3 h of lecture
   const PROVISIONAL_MIN_WORDS = 8; // shorter sentences are finished before this matters
   const PROVISIONAL_STEP_WORDS = 5;
@@ -92,6 +94,8 @@
   let reconnectTimer = null;
   let reconnectDelay = 500;
   let failures = 0;
+  let sessionAt = 0; // when the current Scribe session started
+  let rolloverMs = ROLLOVER_MS;
   let queue = [];
   let prevText = ''; // context for the first chunk after a reconnect
   let audio = null; // { ctx, stream, node }
@@ -569,6 +573,7 @@
   function onMessage(d) {
     switch (d.message_type) {
       case 'session_started':
+        sessionAt = Date.now();
         if (failures >= 4) notice('');
         failures = 0;
         reconnectDelay = 500;
@@ -579,6 +584,8 @@
         break;
       case 'committed_transcript':
         commitText(d.text);
+        // Just after a commit nothing is pending, so a fresh session here cuts no sentence in half.
+        if (Date.now() - sessionAt > rolloverMs) recycle();
         break;
       case 'auth_error':
         fail('ElevenLabs 인증 오류: ' + d.error);
@@ -938,6 +945,9 @@
   restore();
   setMainBtn();
 
-  // Test hook: drop the socket to exercise reconnection.
-  window.__lc = { dropSocket: () => ws && ws.close() };
+  // Test hooks: drop the socket to exercise reconnection; shorten the session rollover.
+  window.__lc = {
+    dropSocket: () => ws && ws.close(),
+    setRollover: (ms) => (rolloverMs = ms),
+  };
 })();

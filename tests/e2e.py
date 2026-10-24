@@ -5,6 +5,7 @@ Midway it drops the socket to exercise reconnection.
 
     EL_KEY=... GM_KEY=... python tests/e2e.py tests/test.wav [seconds]
     BASE_URL=https://jinukmoon.github.io/LiveCaption/ ...   # test the deployed site instead
+    ROLLOVER_MS=20000 ...                                     # roll sessions over every 20 s instead of 15 min
 
 Screenshots and a JSON log go to tests/out/.
 """
@@ -69,6 +70,8 @@ def main():
 
         page.goto(f'{base}#{keys}')
         assert '#' not in page.url, 'keys left in the URL hash'
+        if os.environ.get('ROLLOVER_MS'):
+            page.evaluate(f"window.__lc.setRollover({int(os.environ['ROLLOVER_MS'])})")
         page.screenshot(path=str(OUT / '0_idle.png'))
         page.click('#main-btn')
 
